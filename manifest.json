@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "TrackMyBets Sportsbet Exporter",
+  "version": "0.1.0",
+  "description": "Download full Sportsbet transaction CSVs directly in your browser.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "TrackMyBets Exporter"
+  },
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://www.sportsbet.com.au/*"]
+}
