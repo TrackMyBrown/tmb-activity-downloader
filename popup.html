@@ -4,12 +4,40 @@
     <meta charset="utf-8" />
     <title>TrackMyBets Exporter</title>
     <style>
+      @keyframes spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
       body {
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         margin: 0;
         padding: 12px;
-        width: 280px;
+        width: 320px;
         color: #0f172a;
+      }
+      .header {
+        margin-bottom: 12px;
+      }
+      .header h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        color: #111827;
+      }
+      .subheading {
+        margin: 4px 0 0;
+        font-size: 13px;
+        color: #475569;
+        line-height: 1.4;
+      }
+      .hint {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #475569;
       }
       label {
         display: block;
@@ -51,19 +79,41 @@
         margin-top: 10px;
         font-size: 13px;
       }
+      #status.loading::after {
+        content: "";
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        margin-left: 6px;
+        border: 2px solid #2563eb;
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        vertical-align: middle;
+      }
     </style>
   </head>
   <body>
+    <header class="header">
+      <h1>TMB Activity Downloader</h1>
+      <p class="subheading">
+        Sportsbet restricts you (intentionally??) to downloading only your 50 most recent transactions. Enter a date
+        range to download your full transaction history, up to two years per export.
+      </p>
+    </header>
     <form id="export-form">
       <label>
-        From date (DD/MM/YY)
-        <input type="text" id="fromDate" placeholder="e.g. 01/01/20" />
+        From date
+        <input type="date" id="fromDate" autocomplete="off" required />
       </label>
       <label>
-        To date (DD/MM/YY)
-        <input type="text" id="toDate" placeholder="e.g. 01/01/24" />
+        To date
+        <input type="date" id="toDate" autocomplete="off" required />
       </label>
       <button type="submit" id="fetchBtn">Download CSV</button>
+      <p class="hint">
+        Ensure the active tab is on <strong>sportsbet.com.au</strong> and you’re logged in before running the exporter.
+      </p>
       <div id="status"></div>
     </form>
     <script src="popup.js"></script>

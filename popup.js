@@ -1,10 +1,17 @@
 const form = document.getElementById("export-form");
 const statusEl = document.getElementById("status");
 const fetchBtn = document.getElementById("fetchBtn");
+const fromInput = document.getElementById("fromDate");
+const toInput = document.getElementById("toDate");
 
 const normalizeDateInput = (raw) => {
   if (!raw) return null;
   const cleaned = raw.replace(/\s+/g, "");
+  const isoMatch = cleaned.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) {
+    const [, year, month, day] = isoMatch;
+    return `${day}/${month}/${year.slice(-2)}`;
+  }
   const match = cleaned.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
   if (!match) return null;
   const [, dayPart, monthPart, yearPart] = match;
@@ -25,20 +32,82 @@ const toApiDate = (ddmmyy) => {
   return `${day}/${month}/${yearFourDigits}`;
 };
 
+const getDateFromNormalized = (normalized) => {
+  const apiFormat = toApiDate(normalized);
+  if (!apiFormat) return null;
+  const [day, month, year] = apiFormat.split("/");
+  const date = new Date(Number(year), Number(month) - 1, Number(day));
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const MAX_RANGE_DAYS = 732;
+
+const isRangeWithinLimit = (normalizedFrom, normalizedTo) => {
+  const fromDate = getDateFromNormalized(normalizedFrom);
+  const toDate = getDateFromNormalized(normalizedTo);
+  if (!fromDate || !toDate) return false;
+  const diffMs = Math.abs(toDate.getTime() - fromDate.getTime());
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  return diffDays <= MAX_RANGE_DAYS;
+};
+
+let isSubmitting = false;
+
+const hasValidDate = (inputEl) => {
+  if (!inputEl) return false;
+  return Boolean(normalizeDateInput(inputEl.value.trim()));
+};
+
+const resetStatus = () => {
+  statusEl.textContent = "";
+  statusEl.style.color = "#0f172a";
+  statusEl.classList.remove("loading");
+};
+
+const setStatus = (message, color) => {
+  statusEl.textContent = message;
+  if (color) {
+    statusEl.style.color = color;
+  }
+  statusEl.classList.remove("loading");
+};
+
+const showLoadingStatus = (message) => {
+  statusEl.textContent = message;
+  statusEl.style.color = "#2563eb";
+  statusEl.classList.add("loading");
+};
+
+const updateButtonState = () => {
+  if (isSubmitting) return;
+  const ready = hasValidDate(fromInput) && hasValidDate(toInput);
+  fetchBtn.disabled = !ready;
+};
+
+[fromInput, toInput].forEach((input) => {
+  input?.addEventListener("input", () => {
+    resetStatus();
+    updateButtonState();
+  });
+});
+
+updateButtonState();
+
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
-  statusEl.textContent = "";
+  resetStatus();
+  isSubmitting = true;
   fetchBtn.disabled = true;
   fetchBtn.textContent = "Fetching…";
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) {
-      statusEl.textContent = "No active tab.";
+      setStatus("No active tab.", "#b91c1c");
       return;
     }
     if (!tab.url?.includes("sportsbet.com.au")) {
-      statusEl.textContent = "Open sportsbet.com.au and run the exporter there.";
+      setStatus("Active tab must already be on sportsbet.com.au while you're logged in.", "#b91c1c");
       return;
     }
     const fromDateRaw = document.getElementById("fromDate").value.trim();
@@ -46,15 +115,21 @@ form?.addEventListener("submit", async (event) => {
     const normalizedFrom = normalizeDateInput(fromDateRaw);
     const normalizedTo = normalizeDateInput(toDateRaw);
     if (!normalizedFrom || !normalizedTo) {
-      statusEl.textContent = "Use DD/MM/YY format for both dates (e.g. 01/01/20).";
+      setStatus("Select valid From/To dates before downloading.", "#b91c1c");
       return;
     }
     const fromDateParam = toApiDate(normalizedFrom);
     const toDateParam = toApiDate(normalizedTo);
     if (!fromDateParam || !toDateParam) {
-      statusEl.textContent = "Something went wrong parsing your dates.";
+      setStatus("Something went wrong parsing your dates.", "#b91c1c");
       return;
     }
+    if (!isRangeWithinLimit(normalizedFrom, normalizedTo)) {
+      setStatus("Downloads limited to 24 months at a time. Try a smaller range.", "#b91c1c");
+      return;
+    }
+
+    showLoadingStatus("Downloading… large ranges can take a while.");
 
     const execResults = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -64,25 +139,22 @@ form?.addEventListener("submit", async (event) => {
     });
     const result = execResults?.[0]?.result;
     if (!result) {
-      statusEl.textContent = "Exporter couldn't run on this tab. Refresh sportsbet.com.au and try again.";
-      statusEl.style.color = "#b91c1c";
+      setStatus("Exporter couldn't run on this tab. Refresh sportsbet.com.au and try again.", "#b91c1c");
       return;
     }
 
     if (result.success) {
-      statusEl.textContent = `Downloaded ${result.rowCount} rows to ${result.fileName}`;
-      statusEl.style.color = "#15803d";
+      setStatus(`Downloaded ${result.rowCount} rows to ${result.fileName}`, "#15803d");
     } else {
-      statusEl.textContent = result.message || "Failed to export.";
-      statusEl.style.color = "#b91c1c";
+      setStatus(result.message || "Failed to export.", "#b91c1c");
     }
   } catch (error) {
     console.error(error);
-    statusEl.textContent = error.message || "Unexpected error.";
-    statusEl.style.color = "#b91c1c";
+    setStatus(error.message || "Unexpected error.", "#b91c1c");
   } finally {
-    fetchBtn.disabled = false;
+    isSubmitting = false;
     fetchBtn.textContent = "Download CSV";
+    updateButtonState();
   }
 });
 
@@ -268,14 +340,20 @@ async function runSportsbetExport(dates) {
 
   const accessToken = findAccessToken();
   if (!accessToken) {
-    return { success: false, message: "Access token not found. Refresh Sportsbet and make sure you are logged in." };
+    return {
+      success: false,
+      message: "Could not find your Sportsbet login. Make sure you are signed in on sportsbet.com.au.",
+    };
   }
 
   const tokenPayload = decodeJwtPayload(accessToken);
   const derivedId = tokenPayload?.custId || tokenPayload?.accountNo;
   const custId = derivedId && /^\d+$/.test(String(derivedId)) ? String(derivedId) : findCustomerId();
   if (!custId) {
-    return { success: false, message: "Unable to locate customer-id. Try visiting Account > Transactions first." };
+    return {
+      success: false,
+      message: "Unable to detect your Sportsbet account ID. Visit Account > Transactions and try again.",
+    };
   }
 
   const headers = {
