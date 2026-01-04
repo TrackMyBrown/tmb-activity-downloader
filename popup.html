@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>TrackMyBets Exporter</title>
+    <title>TrackMyBets - Data Download</title>
     <style>
       @keyframes spin {
         from {
@@ -95,10 +95,10 @@
   </head>
   <body>
     <header class="header">
-      <h1>TMB Activity Downloader</h1>
+      <h1>TrackMyBets - Data Download</h1>
       <p class="subheading">
         Sportsbet restricts you (intentionally??) to downloading only your 50 most recent transactions. Enter a date
-        range to download your full transaction history, up to two years per export.
+        range to download your full transaction history.
       </p>
     </header>
     <form id="export-form">
@@ -111,8 +111,17 @@
         <input type="date" id="toDate" autocomplete="off" required />
       </label>
       <button type="submit" id="fetchBtn">Download CSV</button>
+      <button type="button" id="betsBtn">Download Detailed Bets (JSON)</button>
       <p class="hint">
         Ensure the active tab is on <strong>sportsbet.com.au</strong> and you’re logged in before running the exporter.
+      </p>
+      <p class="hint">
+        TrackMyBets provides insights on an as-is basis without warranty as to completeness or accuracy, and accepts no
+        liability for any errors or omissions.
+      </p>
+      <p class="hint">
+        TrackMyBets is independently developed by TrackMyBrown and is neither associated with nor endorsed by Sportsbet
+        or any other organisation.
       </p>
       <div id="status"></div>
     </form>

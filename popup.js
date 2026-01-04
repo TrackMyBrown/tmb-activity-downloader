@@ -1,6 +1,7 @@
 const form = document.getElementById("export-form");
 const statusEl = document.getElementById("status");
 const fetchBtn = document.getElementById("fetchBtn");
+const betsBtn = document.getElementById("betsBtn");
 const fromInput = document.getElementById("fromDate");
 const toInput = document.getElementById("toDate");
 
@@ -40,17 +41,6 @@ const getDateFromNormalized = (normalized) => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
-const MAX_RANGE_DAYS = 732;
-
-const isRangeWithinLimit = (normalizedFrom, normalizedTo) => {
-  const fromDate = getDateFromNormalized(normalizedFrom);
-  const toDate = getDateFromNormalized(normalizedTo);
-  if (!fromDate || !toDate) return false;
-  const diffMs = Math.abs(toDate.getTime() - fromDate.getTime());
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
-  return diffDays <= MAX_RANGE_DAYS;
-};
-
 let isSubmitting = false;
 
 const hasValidDate = (inputEl) => {
@@ -82,6 +72,9 @@ const updateButtonState = () => {
   if (isSubmitting) return;
   const ready = hasValidDate(fromInput) && hasValidDate(toInput);
   fetchBtn.disabled = !ready;
+  if (betsBtn) {
+    betsBtn.disabled = !ready;
+  }
 };
 
 [fromInput, toInput].forEach((input) => {
@@ -95,51 +88,23 @@ updateButtonState();
 
 form?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (isSubmitting) return;
   resetStatus();
   isSubmitting = true;
   fetchBtn.disabled = true;
+  if (betsBtn) betsBtn.disabled = true;
   fetchBtn.textContent = "Fetching…";
 
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) {
-      setStatus("No active tab.", "#b91c1c");
-      return;
-    }
-    if (!tab.url?.includes("sportsbet.com.au")) {
-      setStatus("Active tab must already be on sportsbet.com.au while you're logged in.", "#b91c1c");
-      return;
-    }
-    const fromDateRaw = document.getElementById("fromDate").value.trim();
-    const toDateRaw = document.getElementById("toDate").value.trim();
-    const normalizedFrom = normalizeDateInput(fromDateRaw);
-    const normalizedTo = normalizeDateInput(toDateRaw);
-    if (!normalizedFrom || !normalizedTo) {
-      setStatus("Select valid From/To dates before downloading.", "#b91c1c");
-      return;
-    }
-    const fromDateParam = toApiDate(normalizedFrom);
-    const toDateParam = toApiDate(normalizedTo);
-    if (!fromDateParam || !toDateParam) {
-      setStatus("Something went wrong parsing your dates.", "#b91c1c");
-      return;
-    }
-    if (!isRangeWithinLimit(normalizedFrom, normalizedTo)) {
-      setStatus("Downloads limited to 24 months at a time. Try a smaller range.", "#b91c1c");
-      return;
-    }
-
-    showLoadingStatus("Downloading… large ranges can take a while.");
-
-    const execResults = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: runSportsbetExport,
-      args: [{ displayFrom: normalizedFrom, displayTo: normalizedTo, fromDate: fromDateParam, toDate: toDateParam }],
-      world: "MAIN",
-    });
+    const execResults = await runExport(runSportsbetExport);
     const result = execResults?.[0]?.result;
+    const exception = execResults?.[0]?.exception;
     if (!result) {
-      setStatus("Exporter couldn't run on this tab. Refresh sportsbet.com.au and try again.", "#b91c1c");
+      const message =
+        exception?.message ||
+        chrome.runtime?.lastError?.message ||
+        "Exporter couldn't run on this tab. Refresh sportsbet.com.au and try again.";
+      setStatus(message, "#b91c1c");
       return;
     }
 
@@ -154,9 +119,100 @@ form?.addEventListener("submit", async (event) => {
   } finally {
     isSubmitting = false;
     fetchBtn.textContent = "Download CSV";
+    if (betsBtn) betsBtn.textContent = "Download Detailed Bets (JSON)";
     updateButtonState();
   }
 });
+
+const runExport = async (
+  exportFn,
+  loadingMessage = "Downloading… large ranges can take a while.",
+  options = {},
+) => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    setStatus("No active tab.", "#b91c1c");
+    return null;
+  }
+  if (!tab.url?.includes("sportsbet.com.au")) {
+    setStatus("Active tab must already be on sportsbet.com.au while you're logged in.", "#b91c1c");
+    return null;
+  }
+  const fromDateRaw = document.getElementById("fromDate").value.trim();
+  const toDateRaw = document.getElementById("toDate").value.trim();
+  const normalizedFrom = normalizeDateInput(fromDateRaw);
+  const normalizedTo = normalizeDateInput(toDateRaw);
+  if (!normalizedFrom || !normalizedTo) {
+    setStatus("Select valid From/To dates before downloading.", "#b91c1c");
+    return null;
+  }
+  const fromDateParam = toApiDate(normalizedFrom);
+  const toDateParam = toApiDate(normalizedTo);
+  if (!fromDateParam || !toDateParam) {
+    setStatus("Something went wrong parsing your dates.", "#b91c1c");
+    return null;
+  }
+  showLoadingStatus(loadingMessage);
+
+  try {
+    return await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: exportFn,
+      args: [
+        {
+          displayFrom: normalizedFrom,
+          displayTo: normalizedTo,
+          fromDate: fromDateParam,
+          toDate: toDateParam,
+        },
+      ],
+      world: "MAIN",
+    });
+  } catch (error) {
+    const message = chrome.runtime?.lastError?.message || error?.message || "Failed to run exporter on this tab.";
+    setStatus(message, "#b91c1c");
+    return null;
+  }
+};
+
+betsBtn?.addEventListener("click", async () => {
+  if (isSubmitting) return;
+  resetStatus();
+  isSubmitting = true;
+  betsBtn.disabled = true;
+  fetchBtn.disabled = true;
+  betsBtn.textContent = "Fetching…";
+
+  try {
+    const execResults = await runExport(runSportsbetBetsExport, "Downloading detailed bets…", {
+      allowLargeRange: true,
+    });
+    const result = execResults?.[0]?.result;
+    const exception = execResults?.[0]?.exception;
+    if (!result) {
+      const message =
+        exception?.message ||
+        chrome.runtime?.lastError?.message ||
+        "Exporter couldn't run on this tab. Refresh sportsbet.com.au and try again.";
+      setStatus(message, "#b91c1c");
+      return;
+    }
+    if (result.success) {
+      setStatus(`Downloaded ${result.rowCount} bets to ${result.fileName}`, "#15803d");
+    } else {
+      setStatus(result.message || "Failed to export.", "#b91c1c");
+    }
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Unexpected error.", "#b91c1c");
+  } finally {
+    isSubmitting = false;
+    betsBtn.textContent = "Download Detailed Bets (JSON)";
+    fetchBtn.textContent = "Download CSV";
+    updateButtonState();
+  }
+});
+
 
 // Runs inside the Sportsbet tab.
 async function runSportsbetExport(dates) {
@@ -512,6 +568,326 @@ async function runSportsbetExport(dates) {
     const csvContent = csvLines.join("\n");
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
     const fileName = `sportsbet-transactions-${displayFrom.replace(/\//g, "-")}-to-${displayTo.replace(/\//g, "-")}.csv`;
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(link.href);
+      link.remove();
+    }, 1000);
+
+    return { success: true, rowCount: rows.length, fileName };
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+}
+
+// Runs inside the Sportsbet tab.
+async function runSportsbetBetsExport(dates) {
+  const { displayFrom, displayTo, fromDate, toDate } = dates || {};
+  if (!displayFrom || !displayTo || !fromDate || !toDate) {
+    return { success: false, message: "Invalid dates provided." };
+  }
+
+  function searchObject(obj, predicate) {
+    if (!obj || typeof obj !== "object") return null;
+    for (const [key, value] of Object.entries(obj)) {
+      const hit = predicate(key, value);
+      if (hit) return hit;
+      if (typeof value === "object") {
+        const nested = searchObject(value, predicate);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  }
+
+  const jwtPartPattern = /^[A-Za-z0-9-_]+$/;
+
+  function isLikelyJwt(token) {
+    if (typeof token !== "string") return false;
+    const trimmed = token.trim();
+    if (!trimmed) return false;
+    const parts = trimmed.split(".");
+    if (parts.length !== 3) return false;
+    if (!parts.every((part) => part.length >= 10 && jwtPartPattern.test(part))) return false;
+    return true;
+  }
+
+  function inspectTokenCandidate(key, value) {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (isLikelyJwt(trimmed)) return trimmed;
+    if (key && key.toLowerCase().includes("token") && trimmed.includes(".") && trimmed.length > 60) {
+      return trimmed;
+    }
+    return null;
+  }
+
+  function findAccessToken() {
+    const sources = [window.localStorage, window.sessionStorage];
+    for (const storage of sources) {
+      if (!storage) continue;
+      for (let i = 0; i < storage.length; i += 1) {
+        const key = storage.key(i);
+        const raw = storage.getItem(key);
+        if (!raw) continue;
+        const direct = inspectTokenCandidate(key, raw);
+        if (direct) return direct;
+        try {
+          const parsed = JSON.parse(raw);
+          const nested = searchObject(parsed, (nestedKey, value) => inspectTokenCandidate(nestedKey, value));
+          if (nested) return nested;
+        } catch {
+          continue;
+        }
+      }
+    }
+    const cookieMatch = document.cookie.match(/accessToken=([^;]+)/i);
+    if (cookieMatch) {
+      return decodeURIComponent(cookieMatch[1]);
+    }
+    return null;
+  }
+
+  function normalizeCustomerId(raw) {
+    if (!raw) return null;
+    const cleaned = raw.trim();
+    const digits = cleaned.replace(/[^\d]/g, "");
+    if (digits.length >= 4) {
+      return digits;
+    }
+    return null;
+  }
+
+  function inspectCustomerCandidate(key, value) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      const normalized = normalizeCustomerId(trimmed);
+      if (normalized) return normalized;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const stringified = String(Math.round(value));
+      const normalized = normalizeCustomerId(stringified);
+      if (normalized) return normalized;
+    }
+    if (key && key.toLowerCase().includes("customer") && typeof value === "string" && value.length > 0) {
+      const normalized = normalizeCustomerId(value);
+      if (normalized) return normalized;
+    }
+    return null;
+  }
+
+  function decodeJwtPayload(token) {
+    if (!isLikelyJwt(token)) return null;
+    const [, payload] = token.split(".");
+    try {
+      const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+      const json = atob(padded);
+      return JSON.parse(json);
+    } catch {
+      return null;
+    }
+  }
+
+  function findCustomerId() {
+    const sources = [window.localStorage, window.sessionStorage];
+    for (const storage of sources) {
+      if (!storage) continue;
+      for (let i = 0; i < storage.length; i += 1) {
+        const key = storage.key(i);
+        const raw = storage.getItem(key);
+        if (!raw) continue;
+        const direct = inspectCustomerCandidate(key, raw);
+        if (direct) return direct;
+        try {
+          const parsed = JSON.parse(raw);
+          const nested = searchObject(parsed, (nestedKey, value) => inspectCustomerCandidate(nestedKey, value));
+          if (nested) return nested;
+        } catch {
+          continue;
+        }
+      }
+    }
+    const cookieMatch = document.cookie.match(/customer-id=([^;]+)/i);
+    if (cookieMatch) {
+      const normalized = normalizeCustomerId(decodeURIComponent(cookieMatch[1]));
+      if (normalized) return normalized;
+    }
+    return null;
+  }
+
+  const limit = 50;
+  const dateType = "ALL";
+  const base = "https://www.sportsbet.com.au/apigw/history/bets";
+  const accessToken = findAccessToken();
+  if (!accessToken) {
+    return {
+      success: false,
+      message: "Could not find your Sportsbet login. Make sure you are signed in on sportsbet.com.au.",
+    };
+  }
+
+  const tokenPayload = decodeJwtPayload(accessToken);
+  const derivedId = tokenPayload?.custId || tokenPayload?.accountNo;
+  const custId = derivedId && /^\d+$/.test(String(derivedId)) ? String(derivedId) : findCustomerId();
+  if (!custId) {
+    return {
+      success: false,
+      message: "Unable to detect your Sportsbet account ID. Visit Account > Bet History and try again.",
+    };
+  }
+
+  const headers = {
+    accept: "application/json",
+    "content-type": "application/json",
+    apptoken: "cxp-desktop-web",
+    channel: "cxp",
+    accesstoken: accessToken,
+    authorization: `Bearer ${accessToken}`,
+    "cxp-token": accessToken,
+    "customer-id": custId,
+    "x-request-id": crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+  };
+
+  const toDateObject = (value) => {
+    if (!value && value !== 0) return null;
+    if (value instanceof Date) return value;
+    if (typeof value === "number") {
+      const ms = value > 1e12 ? value : value * 1000;
+      const date = new Date(ms);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (/^\d+$/.test(trimmed)) {
+        const num = Number(trimmed);
+        if (Number.isFinite(num)) {
+          const ms = trimmed.length >= 13 ? num : num * 1000;
+          const date = new Date(ms);
+          return Number.isNaN(date.getTime()) ? null : date;
+        }
+      }
+      const candidate = trimmed.includes(" ") ? trimmed.replace(" ", "T") : trimmed;
+      const date = new Date(candidate);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+    return null;
+  };
+
+  const parseApiDate = (value, endOfDay = false) => {
+    if (!value) return null;
+    const [day, month, year] = value.split("/");
+    if (!day || !month || !year) return null;
+    const date = new Date(Number(year), Number(month) - 1, Number(day));
+    if (Number.isNaN(date.getTime())) return null;
+    if (endOfDay) {
+      date.setHours(23, 59, 59, 999);
+    } else {
+      date.setHours(0, 0, 0, 0);
+    }
+    return date;
+  };
+
+  const fromBound = parseApiDate(fromDate, false);
+  const toBound = parseApiDate(toDate, true);
+
+  const formatForLastTime = (date) => {
+    if (!date) return null;
+    const pad = (num) => String(num).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
+      date.getHours(),
+    )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  };
+
+  try {
+    const extractBets = (payload) => {
+      if (!payload || typeof payload !== "object") return [];
+      const candidates = [payload.betList, payload.bets, payload.items, payload.data];
+      for (const candidate of candidates) {
+        if (Array.isArray(candidate) && candidate.length) {
+          return candidate;
+        }
+      }
+      return Array.isArray(payload) ? payload : [];
+    };
+
+    const isWithinRange = (bet) => {
+      const placedAt = toDateObject(bet?.placedAt);
+      if (!placedAt) return true;
+      if (fromBound && placedAt < fromBound) return false;
+      if (toBound && placedAt > toBound) return false;
+      return true;
+    };
+
+    const rows = [];
+    let lastId = null;
+    let lastTime = null;
+
+    while (true) {
+      const params = new URLSearchParams({
+        dateType,
+        filterType: "SETTLED",
+        limit: String(limit),
+        includeLegData: "true",
+        detailedCashout: "true",
+        includeForm: "true",
+        sortField: "DATE",
+        sortOrder: "DESC",
+        excludeSgmCashoutQuotes: "true",
+      });
+      if (lastId) {
+        params.set("lastId", lastId);
+        if (lastTime) params.set("lastTime", lastTime);
+      }
+      const response = await fetch(`${base}?${params.toString()}`, {
+        headers,
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(`Sportsbet responded ${response.status}`);
+      }
+
+      const data = await response.json();
+      const chunk = extractBets(data);
+      if (!chunk.length) {
+        break;
+      }
+      const filtered = chunk.filter(isWithinRange);
+      rows.push(...filtered);
+
+      const last = chunk[chunk.length - 1];
+      lastId = last?.jrnlId || last?.betId || last?.id;
+      const rawTime = toDateObject(last?.placedAt);
+      lastTime = rawTime ? formatForLastTime(rawTime) : null;
+
+      if (fromBound && rawTime && rawTime < fromBound) {
+        break;
+      }
+      if (!lastId || chunk.length < limit) {
+        break;
+      }
+    }
+
+    if (!rows.length) {
+      return { success: false, message: "No bets found for that date range." };
+    }
+
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      range: { from: displayFrom, to: displayTo },
+      betCount: rows.length,
+      bets: rows,
+    };
+
+    const jsonContent = JSON.stringify(payload, null, 2);
+    const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8" });
+    const fileName = `sportsbet-bets-${displayFrom.replace(/\//g, "-")}-to-${displayTo.replace(/\//g, "-")}.json`;
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
     link.download = fileName;
