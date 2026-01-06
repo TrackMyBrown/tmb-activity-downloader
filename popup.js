@@ -109,7 +109,7 @@ form?.addEventListener("submit", async (event) => {
     }
 
     if (result.success) {
-      setStatus(`Downloaded ${result.rowCount} rows to ${result.fileName}`, "#15803d");
+      setStatus(`Downloaded ${result.rowCount} transactions to ${result.fileName}`, "#15803d");
     } else {
       setStatus(result.message || "Failed to export.", "#b91c1c");
     }
@@ -118,7 +118,7 @@ form?.addEventListener("submit", async (event) => {
     setStatus(error.message || "Unexpected error.", "#b91c1c");
   } finally {
     isSubmitting = false;
-    fetchBtn.textContent = "Download CSV";
+    fetchBtn.textContent = "Download Transactions (JSON)";
     if (betsBtn) betsBtn.textContent = "Download Detailed Bets (JSON)";
     updateButtonState();
   }
@@ -208,7 +208,7 @@ betsBtn?.addEventListener("click", async () => {
   } finally {
     isSubmitting = false;
     betsBtn.textContent = "Download Detailed Bets (JSON)";
-    fetchBtn.textContent = "Download CSV";
+    fetchBtn.textContent = "Download Transactions (JSON)";
     updateButtonState();
   }
 });
@@ -379,21 +379,8 @@ async function runSportsbetExport(dates) {
   }
 
   const limit = 50;
+  const dateType = "ALL";
   const base = "https://www.sportsbet.com.au/apigw/history/transactions";
-  const cols = [
-    "Time (AEST)",
-    "Type",
-    "Summary",
-    "Transaction Id",
-    "Bet Id",
-    "Amount",
-    "Balance",
-    "Single",
-    "Multiple",
-    "Exotic",
-    "Pool",
-  ];
-
   const accessToken = findAccessToken();
   if (!accessToken) {
     return {
@@ -450,9 +437,28 @@ async function runSportsbetExport(dates) {
     return null;
   };
 
+  const parseApiDate = (value, endOfDay = false) => {
+    if (!value) return null;
+    const [day, month, year] = value.split("/");
+    if (!day || !month || !year) return null;
+    const date = new Date(Number(year), Number(month) - 1, Number(day));
+    if (Number.isNaN(date.getTime())) return null;
+    if (endOfDay) {
+      date.setHours(23, 59, 59, 999);
+    } else {
+      date.setHours(0, 0, 0, 0);
+    }
+    return date;
+  };
+
+  const fromBound = parseApiDate(fromDate, false);
+  const toBound = parseApiDate(toDate, true);
+
   const rows = [];
   let lastId = null;
   let lastTime = null;
+  const seenCursors = new Set();
+  let pageCount = 0;
 
   try {
     const extractTransactions = (payload) => {
@@ -481,15 +487,24 @@ async function runSportsbetExport(dates) {
       if (!date) {
         return value ? String(value) : null;
       }
-      return date.toISOString().replace("T", " ").split(".")[0];
+      const pad = (num) => String(num).padStart(2, "0");
+      const year = date.getFullYear();
+      const month = pad(date.getMonth() + 1);
+      const day = pad(date.getDate());
+      const hours = pad(date.getHours());
+      const minutes = pad(date.getMinutes());
+      const seconds = pad(date.getSeconds());
+      return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
     };
 
     while (true) {
+      pageCount += 1;
+      if (pageCount > 5000) {
+        throw new Error("Stopped after 5000 pages to avoid an infinite loop.");
+      }
       const params = new URLSearchParams({
-        dateType: "CUSTOM",
+        dateType,
         filterType: "ALL",
-        fromDate,
-        toDate,
         limit: String(limit),
         sortOrder: "DESC",
       });
@@ -510,13 +525,32 @@ async function runSportsbetExport(dates) {
       if (!chunk.length) {
         break;
       }
-      rows.push(...chunk);
+      const filtered = chunk.filter((tx) => {
+        const rawTs = getRawTimestamp(tx);
+        const txTime = toDateObject(rawTs);
+        if (!txTime) return true;
+        if (fromBound && txTime < fromBound) return false;
+        if (toBound && txTime > toBound) return false;
+        return true;
+      });
+      rows.push(...filtered);
       const last = chunk[chunk.length - 1];
       lastId = last.transactionId || last.transactionID || last.id;
       const rawTs = getRawTimestamp(last);
       lastTime = formatAsParamTimestamp(rawTs);
-      if (!lastId || chunk.length < limit) {
+      if (!lastId) {
         break;
+      }
+      const cursorKey = `${lastId}|${lastTime || ""}`;
+      if (seenCursors.has(cursorKey)) {
+        break;
+      }
+      seenCursors.add(cursorKey);
+      if (fromBound) {
+        const lastTimeDate = toDateObject(rawTs);
+        if (lastTimeDate && lastTimeDate < fromBound) {
+          break;
+        }
       }
     }
 
@@ -524,50 +558,16 @@ async function runSportsbetExport(dates) {
       return { success: false, message: "No transactions found for that date range." };
     }
 
-    const escapeVal = (val) => `"${String(val ?? "").replace(/"/g, '""')}"`;
-    const toBool = (value) => {
-      if (typeof value === "boolean") return String(value);
-      if (typeof value === "string") {
-        const lower = value.trim().toLowerCase();
-        if (lower === "true" || lower === "false") return lower;
-      }
-      return "false";
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      range: { from: displayFrom, to: displayTo },
+      transactionCount: rows.length,
+      transactions: rows,
     };
-    const toDecimal = (value) => {
-      const num = Number(value);
-      return Number.isFinite(num) ? num.toFixed(2) : String(value ?? "0");
-    };
-    const formatTimestamp = (value) => {
-      if (!value && value !== 0) return "";
-      const date = toDateObject(value);
-      if (!date) return typeof value === "number" ? String(value) : value;
-      const datePart = date.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit", year: "numeric" });
-      const timePart = date.toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", hour12: false });
-      return `${datePart} ${timePart}`;
-    };
-    const mapRow = (tx) => ({
-      "Time (AEST)": formatTimestamp(getRawTimestamp(tx) || tx.createdAt),
-      Type: tx.type || tx.transactionType || "",
-      Summary: tx.summary || tx.description || tx.detail || "",
-      "Transaction Id": tx.transactionId || tx.id || "",
-      "Bet Id": tx.betId || tx.betSlipId || tx.wagerId || "",
-      Amount: toDecimal(tx.amount || tx.value || tx.stakeChange || tx.credit || tx.debit || 0),
-      Balance: toDecimal(tx.balance || tx.balanceAmount || tx.runningBalance || 0),
-      Single: toBool(tx.single || tx.isSingle),
-      Multiple: toBool(tx.multiple || tx.isMulti),
-      Exotic: toBool(tx.exotic || tx.isExotic),
-      Pool: toBool(tx.pool || tx.isPool),
-    });
 
-    const csvLines = [cols.map((col) => `"${col}"`).join(",")];
-    rows.forEach((tx) => {
-      const mapped = mapRow(tx);
-      csvLines.push(cols.map((col) => escapeVal(mapped[col])).join(","));
-    });
-
-    const csvContent = csvLines.join("\n");
-    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
-    const fileName = `sportsbet-transactions-${displayFrom.replace(/\//g, "-")}-to-${displayTo.replace(/\//g, "-")}.csv`;
+    const jsonContent = JSON.stringify(payload, null, 2);
+    const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8" });
+    const fileName = `sportsbet-transactions-${displayFrom.replace(/\//g, "-")}-to-${displayTo.replace(/\//g, "-")}.json`;
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
     link.download = fileName;
