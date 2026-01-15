@@ -1,9 +1,11 @@
 const form = document.getElementById("export-form");
 const statusEl = document.getElementById("status");
 const fetchBtn = document.getElementById("fetchBtn");
-const betsBtn = document.getElementById("betsBtn");
 const fromInput = document.getElementById("fromDate");
 const toInput = document.getElementById("toDate");
+const quick1YearCombinedBtn = document.getElementById("quick1YearCombined");
+const quick2YearCombinedBtn = document.getElementById("quick2YearCombined");
+const quick3YearCombinedBtn = document.getElementById("quick3YearCombined");
 
 const normalizeDateInput = (raw) => {
   if (!raw) return null;
@@ -68,13 +70,17 @@ const showLoadingStatus = (message) => {
   statusEl.classList.add("loading");
 };
 
+const disableQuickButtons = (disabled) => {
+  [quick1YearCombinedBtn, quick2YearCombinedBtn, quick3YearCombinedBtn].forEach((button) => {
+    if (button) button.disabled = disabled;
+  });
+};
+
 const updateButtonState = () => {
   if (isSubmitting) return;
   const ready = hasValidDate(fromInput) && hasValidDate(toInput);
   fetchBtn.disabled = !ready;
-  if (betsBtn) {
-    betsBtn.disabled = !ready;
-  }
+  disableQuickButtons(false);
 };
 
 [fromInput, toInput].forEach((input) => {
@@ -92,24 +98,17 @@ form?.addEventListener("submit", async (event) => {
   resetStatus();
   isSubmitting = true;
   fetchBtn.disabled = true;
-  if (betsBtn) betsBtn.disabled = true;
+  disableQuickButtons(true);
   fetchBtn.textContent = "Fetching…";
 
   try {
-    const execResults = await runExport(runSportsbetExport);
-    const result = execResults?.[0]?.result;
-    const exception = execResults?.[0]?.exception;
+    const result = await runCombinedExport();
     if (!result) {
-      const message =
-        exception?.message ||
-        chrome.runtime?.lastError?.message ||
-        "Exporter couldn't run on this tab. Refresh sportsbet.com.au and try again.";
-      setStatus(message, "#b91c1c");
       return;
     }
 
     if (result.success) {
-      setStatus(`Downloaded ${result.rowCount} transactions to ${result.fileName}`, "#15803d");
+      setStatus(`Downloaded ${result.rowCount} rows to ${result.fileName}`, "#15803d");
     } else {
       setStatus(result.message || "Failed to export.", "#b91c1c");
     }
@@ -118,26 +117,12 @@ form?.addEventListener("submit", async (event) => {
     setStatus(error.message || "Unexpected error.", "#b91c1c");
   } finally {
     isSubmitting = false;
-    fetchBtn.textContent = "Download Transactions (JSON)";
-    if (betsBtn) betsBtn.textContent = "Download Detailed Bets (JSON)";
+    fetchBtn.textContent = "Download Data - Custom Range";
     updateButtonState();
   }
 });
 
-const runExport = async (
-  exportFn,
-  loadingMessage = "Downloading… large ranges can take a while.",
-  options = {},
-) => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) {
-    setStatus("No active tab.", "#b91c1c");
-    return null;
-  }
-  if (!tab.url?.includes("sportsbet.com.au")) {
-    setStatus("Active tab must already be on sportsbet.com.au while you're logged in.", "#b91c1c");
-    return null;
-  }
+const getValidatedDates = () => {
   const fromDateRaw = document.getElementById("fromDate").value.trim();
   const toDateRaw = document.getElementById("toDate").value.trim();
   const normalizedFrom = normalizeDateInput(fromDateRaw);
@@ -152,20 +137,33 @@ const runExport = async (
     setStatus("Something went wrong parsing your dates.", "#b91c1c");
     return null;
   }
-  showLoadingStatus(loadingMessage);
+  return {
+    displayFrom: normalizedFrom,
+    displayTo: normalizedTo,
+    fromDate: fromDateParam,
+    toDate: toDateParam,
+  };
+};
+
+const executeExport = async (exportFn, dates, payloadOptions = {}, loadingMessage) => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) {
+    setStatus("No active tab.", "#b91c1c");
+    return null;
+  }
+  if (!tab.url?.includes("sportsbet.com.au")) {
+    setStatus("Active tab must already be on sportsbet.com.au while you're logged in.", "#b91c1c");
+    return null;
+  }
+  if (loadingMessage) {
+    showLoadingStatus(loadingMessage);
+  }
 
   try {
     return await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: exportFn,
-      args: [
-        {
-          displayFrom: normalizedFrom,
-          displayTo: normalizedTo,
-          fromDate: fromDateParam,
-          toDate: toDateParam,
-        },
-      ],
+      args: [dates, payloadOptions],
       world: "MAIN",
     });
   } catch (error) {
@@ -175,30 +173,111 @@ const runExport = async (
   }
 };
 
-betsBtn?.addEventListener("click", async () => {
+const runExport = async (exportFn, loadingMessage = "Downloading… large ranges can take a while.") => {
+  const dates = getValidatedDates();
+  if (!dates) return null;
+  return executeExport(exportFn, dates, {}, loadingMessage);
+};
+
+const downloadJsonFile = (jsonContent, fileName) =>
+  new Promise((resolve, reject) => {
+    if (!chrome?.downloads?.download) {
+      reject(new Error("Downloads permission not active. Reload the extension and accept permissions."));
+      return;
+    }
+    const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    chrome.downloads.download({ url, filename: fileName, saveAs: false }, (downloadId) => {
+      const err = chrome.runtime?.lastError;
+      if (err || !downloadId) {
+        URL.revokeObjectURL(url);
+        reject(new Error(err?.message || "Failed to start download."));
+        return;
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      resolve(downloadId);
+    });
+  });
+
+const runCombinedExport = async () => {
+  const dates = getValidatedDates();
+  if (!dates) return null;
+
+  const combinedExec = await executeExport(
+    runSportsbetCombinedExport,
+    dates,
+    { returnPayload: true },
+    "Downloading bet + transaction data…",
+  );
+  if (combinedExec?.[0]?.exception) {
+    console.error(combinedExec[0].exception);
+  }
+  const combinedResult = combinedExec?.[0]?.result;
+  if (!combinedResult) {
+    const message =
+      combinedExec?.[0]?.exception?.message ||
+      chrome.runtime?.lastError?.message ||
+      "Exporter couldn't run on this tab. Refresh sportsbet.com.au and try again.";
+    setStatus(message, "#b91c1c");
+    return null;
+  }
+  if (!combinedResult.success) {
+    setStatus(combinedResult.message || "Failed to export.", "#b91c1c");
+    return combinedResult;
+  }
+
+  const payload = combinedResult.payload;
+  if (!payload) {
+    setStatus("Download payload missing from exporter.", "#b91c1c");
+    return { success: false, message: "Missing payload." };
+  }
+
+  const jsonContent = JSON.stringify(payload, null, 2);
+  const fromLabel = payload.range?.from || "from";
+  const toLabel = payload.range?.to || "to";
+  const fileName = `sportsbet-data-${fromLabel.replace(/\//g, "-")}-to-${toLabel.replace(/\//g, "-")}.json`;
+  try {
+    await downloadJsonFile(jsonContent, fileName);
+  } catch (error) {
+    setStatus(error?.message || "Failed to start download.", "#b91c1c");
+    return { success: false, message: error?.message };
+  }
+
+  return { success: true, rowCount: combinedResult.rowCount, fileName };
+};
+
+const formatDateInput = (value) => {
+  if (!value) return "";
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const setDateRange = (yearsBack) => {
+  const today = new Date();
+  const fromDate = new Date(today);
+  fromDate.setFullYear(today.getFullYear() - yearsBack);
+  fromInput.value = formatDateInput(fromDate);
+  toInput.value = formatDateInput(today);
+};
+
+const runQuickExport = async (yearsBack) => {
   if (isSubmitting) return;
   resetStatus();
+  setDateRange(yearsBack);
+  updateButtonState();
   isSubmitting = true;
-  betsBtn.disabled = true;
   fetchBtn.disabled = true;
-  betsBtn.textContent = "Fetching…";
-
+  disableQuickButtons(true);
+  fetchBtn.textContent = "Fetching…";
   try {
-    const execResults = await runExport(runSportsbetBetsExport, "Downloading detailed bets…", {
-      allowLargeRange: true,
-    });
-    const result = execResults?.[0]?.result;
-    const exception = execResults?.[0]?.exception;
+    const result = await runCombinedExport();
     if (!result) {
-      const message =
-        exception?.message ||
-        chrome.runtime?.lastError?.message ||
-        "Exporter couldn't run on this tab. Refresh sportsbet.com.au and try again.";
-      setStatus(message, "#b91c1c");
       return;
     }
     if (result.success) {
-      setStatus(`Downloaded ${result.rowCount} bets to ${result.fileName}`, "#15803d");
+      setStatus(`Downloaded ${result.rowCount} rows to ${result.fileName}`, "#15803d");
     } else {
       setStatus(result.message || "Failed to export.", "#b91c1c");
     }
@@ -207,15 +286,468 @@ betsBtn?.addEventListener("click", async () => {
     setStatus(error.message || "Unexpected error.", "#b91c1c");
   } finally {
     isSubmitting = false;
-    betsBtn.textContent = "Download Detailed Bets (JSON)";
-    fetchBtn.textContent = "Download Transactions (JSON)";
+    fetchBtn.textContent = "Download Data - Custom Range";
     updateButtonState();
   }
-});
+};
+
+quick1YearCombinedBtn?.addEventListener("click", () => runQuickExport(1));
+quick2YearCombinedBtn?.addEventListener("click", () => runQuickExport(2));
+quick3YearCombinedBtn?.addEventListener("click", () => runQuickExport(3));
+
+// Runs inside the Sportsbet tab.
+async function runSportsbetCombinedExport(dates, options = {}) {
+  const { displayFrom, displayTo, fromDate, toDate } = dates || {};
+  if (!displayFrom || !displayTo || !fromDate || !toDate) {
+    return { success: false, message: "Invalid dates provided." };
+  }
+
+  function searchObject(obj, predicate) {
+    if (!obj || typeof obj !== "object") return null;
+    for (const [key, value] of Object.entries(obj)) {
+      const hit = predicate(key, value);
+      if (hit) return hit;
+      if (typeof value === "object") {
+        const nested = searchObject(value, predicate);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  }
+
+  const jwtPartPattern = /^[A-Za-z0-9-_]+$/;
+
+  function isLikelyJwt(token) {
+    if (typeof token !== "string") return false;
+    const trimmed = token.trim();
+    if (!trimmed) return false;
+    const parts = trimmed.split(".");
+    if (parts.length !== 3) return false;
+    if (!parts.every((part) => part.length >= 10 && jwtPartPattern.test(part))) return false;
+    return true;
+  }
+
+  function inspectTokenCandidate(key, value) {
+    if (typeof value !== "string") return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (isLikelyJwt(trimmed)) return trimmed;
+    if (key && key.toLowerCase().includes("token") && trimmed.includes(".") && trimmed.length > 60) {
+      return trimmed;
+    }
+    return null;
+  }
+
+  function findAccessToken() {
+    const knownKeys = new Set([
+      "accesstoken",
+      "accesstokenv2",
+      "accesstoken_v2",
+      "accesstoken2",
+      "accesstokenlatest",
+      "accesstokenlegacy",
+      "accesstokenprod",
+      "cxp-token",
+      "cxptoken",
+      "cxpaccesstoken",
+    ]);
+    const sources = [window.localStorage, window.sessionStorage];
+    for (const storage of sources) {
+      if (!storage) continue;
+      for (let i = 0; i < storage.length; i += 1) {
+        const key = storage.key(i);
+        const raw = storage.getItem(key);
+        if (!raw) continue;
+        if (knownKeys.has(key?.toLowerCase?.())) {
+          const token = inspectTokenCandidate(key, raw);
+          if (token) return token;
+        }
+        const direct = inspectTokenCandidate(key, raw);
+        if (direct) return direct;
+        try {
+          const parsed = JSON.parse(raw);
+          const nested = searchObject(parsed, (nestedKey, value) => inspectTokenCandidate(nestedKey, value));
+          if (nested) return nested;
+        } catch {
+          continue;
+        }
+      }
+    }
+    const cookieMatch = document.cookie.match(/accessToken=([^;]+)/i);
+    if (cookieMatch) {
+      return decodeURIComponent(cookieMatch[1]);
+    }
+    return null;
+  }
+
+  function normalizeCustomerId(raw) {
+    if (!raw) return null;
+    const cleaned = raw.trim();
+    const digits = cleaned.replace(/[^\d]/g, "");
+    if (digits.length >= 4) {
+      return digits;
+    }
+    return null;
+  }
+
+  function inspectCustomerCandidate(key, value) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      const normalized = normalizeCustomerId(trimmed);
+      if (normalized) return normalized;
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const stringified = String(Math.round(value));
+      const normalized = normalizeCustomerId(stringified);
+      if (normalized) return normalized;
+    }
+    if (key && key.toLowerCase().includes("customer") && typeof value === "string" && value.length > 0) {
+      const normalized = normalizeCustomerId(value);
+      if (normalized) return normalized;
+    }
+    return null;
+  }
+
+  function decodeJwtPayload(token) {
+    if (!isLikelyJwt(token)) return null;
+    const [, payload] = token.split(".");
+    try {
+      const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+      const json = atob(padded);
+      return JSON.parse(json);
+    } catch {
+      return null;
+    }
+  }
+
+  function findCustomerId() {
+    const sources = [window.localStorage, window.sessionStorage];
+    for (const storage of sources) {
+      if (!storage) continue;
+      for (let i = 0; i < storage.length; i += 1) {
+        const key = storage.key(i);
+        const raw = storage.getItem(key);
+        if (!raw) continue;
+        const direct = inspectCustomerCandidate(key, raw);
+        if (direct) return direct;
+        try {
+          const parsed = JSON.parse(raw);
+          const nested = searchObject(parsed, (nestedKey, value) => inspectCustomerCandidate(nestedKey, value));
+          if (nested) return nested;
+        } catch {
+          continue;
+        }
+      }
+    }
+    const cookieMatch = document.cookie.match(/customer-id=([^;]+)/i);
+    if (cookieMatch) {
+      const normalized = normalizeCustomerId(decodeURIComponent(cookieMatch[1]));
+      if (normalized) return normalized;
+    }
+    return null;
+  }
+
+  const accessToken = findAccessToken();
+  if (!accessToken) {
+    return {
+      success: false,
+      message: "Could not find your Sportsbet login. Make sure you are signed in on sportsbet.com.au.",
+    };
+  }
+
+  const tokenPayload = decodeJwtPayload(accessToken);
+  const derivedId = tokenPayload?.custId || tokenPayload?.accountNo;
+  const custId = derivedId && /^\d+$/.test(String(derivedId)) ? String(derivedId) : findCustomerId();
+  if (!custId) {
+    return {
+      success: false,
+      message: "Unable to detect your Sportsbet account ID. Visit Account > History and try again.",
+    };
+  }
+
+  const headers = {
+    accept: "application/json",
+    "content-type": "application/json",
+    apptoken: "cxp-desktop-web",
+    channel: "cxp",
+    accesstoken: accessToken,
+    authorization: `Bearer ${accessToken}`,
+    "cxp-token": accessToken,
+    "customer-id": custId,
+    "x-request-id": crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+  };
+
+  const toDateObject = (value) => {
+    if (!value && value !== 0) return null;
+    if (value instanceof Date) return value;
+    if (typeof value === "number") {
+      const ms = value > 1e12 ? value : value * 1000;
+      const date = new Date(ms);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (/^\d+$/.test(trimmed)) {
+        const num = Number(trimmed);
+        if (Number.isFinite(num)) {
+          const ms = trimmed.length >= 13 ? num : num * 1000;
+          const date = new Date(ms);
+          return Number.isNaN(date.getTime()) ? null : date;
+        }
+      }
+      const candidate = trimmed.includes(" ") ? trimmed.replace(" ", "T") : trimmed;
+      const date = new Date(candidate);
+      return Number.isNaN(date.getTime()) ? null : date;
+    }
+    return null;
+  };
+
+  const parseApiDate = (value, endOfDay = false) => {
+    if (!value) return null;
+    const [day, month, year] = value.split("/");
+    if (!day || !month || !year) return null;
+    const date = new Date(Number(year), Number(month) - 1, Number(day));
+    if (Number.isNaN(date.getTime())) return null;
+    if (endOfDay) {
+      date.setHours(23, 59, 59, 999);
+    } else {
+      date.setHours(0, 0, 0, 0);
+    }
+    return date;
+  };
+
+  const fromBound = parseApiDate(fromDate, false);
+  const toBound = parseApiDate(toDate, true);
+
+  const formatForLastTime = (date) => {
+    if (!date) return null;
+    const pad = (num) => String(num).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(
+      date.getHours(),
+    )}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  };
+
+  const formatAsParamTimestamp = (value) => {
+    const date = toDateObject(value);
+    if (!date) {
+      return value ? String(value) : null;
+    }
+    const pad = (num) => String(num).padStart(2, "0");
+    const year = date.getFullYear();
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  };
+
+  const fetchBets = async () => {
+    const base = "https://www.sportsbet.com.au/apigw/history/bets";
+    const limit = 50;
+    const dateType = "ALL";
+
+    const extractBets = (payload) => {
+      if (!payload || typeof payload !== "object") return [];
+      const candidates = [payload.betList, payload.bets, payload.items, payload.data];
+      for (const candidate of candidates) {
+        if (Array.isArray(candidate) && candidate.length) {
+          return candidate;
+        }
+      }
+      return Array.isArray(payload) ? payload : [];
+    };
+
+    const isWithinRange = (bet) => {
+      const placedAt = toDateObject(bet?.placedAt);
+      if (!placedAt) return true;
+      if (fromBound && placedAt < fromBound) return false;
+      if (toBound && placedAt > toBound) return false;
+      return true;
+    };
+
+    const rows = [];
+    let lastId = null;
+    let lastTime = null;
+
+    while (true) {
+      const params = new URLSearchParams({
+        dateType,
+        filterType: "SETTLED",
+        limit: String(limit),
+        includeLegData: "true",
+        detailedCashout: "true",
+        includeForm: "true",
+        sortField: "DATE",
+        sortOrder: "DESC",
+        excludeSgmCashoutQuotes: "true",
+      });
+      if (lastId) {
+        params.set("lastId", lastId);
+        if (lastTime) params.set("lastTime", lastTime);
+      }
+      const response = await fetch(`${base}?${params.toString()}`, {
+        headers,
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(`Sportsbet responded ${response.status}`);
+      }
+
+      const data = await response.json();
+      const chunk = extractBets(data);
+      if (!chunk.length) {
+        break;
+      }
+      const filtered = chunk.filter(isWithinRange);
+      rows.push(...filtered);
+
+      const last = chunk[chunk.length - 1];
+      lastId = last?.jrnlId || last?.betId || last?.id;
+      const rawTime = toDateObject(last?.placedAt);
+      lastTime = rawTime ? formatForLastTime(rawTime) : null;
+
+      if (fromBound && rawTime && rawTime < fromBound) {
+        break;
+      }
+      if (!lastId || chunk.length < limit) {
+        break;
+      }
+    }
+
+    return rows;
+  };
+
+  const fetchTransactions = async () => {
+    const base = "https://www.sportsbet.com.au/apigw/history/transactions";
+    const limit = 50;
+    const dateType = "ALL";
+
+    const extractTransactions = (payload) => {
+      if (!payload || typeof payload !== "object") return [];
+      const candidates = [
+        payload.transactions,
+        payload.items,
+        payload.transactionList,
+        payload?.transactions?.items,
+        payload?.transactions?.transactions,
+        payload?.data,
+      ];
+      for (const candidate of candidates) {
+        if (Array.isArray(candidate) && candidate.length) {
+          return candidate;
+        }
+      }
+      return Array.isArray(payload) ? payload : [];
+    };
+
+    const getRawTimestamp = (tx) =>
+      tx.transactionTime || tx.transactionDate || tx.date || tx.time || tx.transaction_time || null;
+
+    const rows = [];
+    let lastId = null;
+    let lastTime = null;
+    const seenCursors = new Set();
+    let pageCount = 0;
+
+    while (true) {
+      pageCount += 1;
+      if (pageCount > 5000) {
+        throw new Error("Stopped after 5000 pages to avoid an infinite loop.");
+      }
+      const params = new URLSearchParams({
+        dateType,
+        filterType: "ALL",
+        limit: String(limit),
+        sortOrder: "DESC",
+      });
+      if (lastId) {
+        params.set("lastId", lastId);
+        if (lastTime) params.set("lastTime", lastTime);
+      }
+      const response = await fetch(`${base}?${params.toString()}`, {
+        headers,
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(`Sportsbet responded ${response.status}`);
+      }
+
+      const data = await response.json();
+      const chunk = extractTransactions(data);
+      if (!chunk.length) {
+        break;
+      }
+      const filtered = chunk.filter((tx) => {
+        const rawTs = getRawTimestamp(tx);
+        const txTime = toDateObject(rawTs);
+        if (!txTime) return true;
+        if (fromBound && txTime < fromBound) return false;
+        if (toBound && txTime > toBound) return false;
+        return true;
+      });
+      rows.push(...filtered);
+      const last = chunk[chunk.length - 1];
+      lastId = last.transactionId || last.transactionID || last.id;
+      const rawTs = getRawTimestamp(last);
+      lastTime = formatAsParamTimestamp(rawTs);
+      if (!lastId) {
+        break;
+      }
+      const cursorKey = `${lastId}|${lastTime || ""}`;
+      if (seenCursors.has(cursorKey)) {
+        break;
+      }
+      seenCursors.add(cursorKey);
+      if (fromBound) {
+        const lastTimeDate = toDateObject(rawTs);
+        if (lastTimeDate && lastTimeDate < fromBound) {
+          break;
+        }
+      }
+    }
+
+    return rows;
+  };
+
+  try {
+    const [bets, transactions] = await Promise.all([fetchBets(), fetchTransactions()]);
+    if (!bets.length) {
+      return { success: false, message: "No bets found for that date range." };
+    }
+    if (!transactions.length) {
+      return { success: false, message: "No transactions found for that date range." };
+    }
+
+    const sanitizedTransactions = transactions.map((tx) => {
+      if (!tx || typeof tx !== "object") return tx;
+      const { summary, ...rest } = tx;
+      return rest;
+    });
+
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      range: { from: displayFrom, to: displayTo },
+      betCount: bets.length,
+      transactionCount: sanitizedTransactions.length,
+      bets,
+      transactions: sanitizedTransactions,
+    };
+    if (options.returnPayload) {
+      return { success: true, rowCount: payload.betCount + payload.transactionCount, payload };
+    }
+
+    return { success: false, message: "Combined export must be downloaded via the extension popup." };
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+}
 
 
 // Runs inside the Sportsbet tab.
-async function runSportsbetExport(dates) {
+async function runSportsbetExport(dates, options = {}) {
   const { displayFrom, displayTo, fromDate, toDate } = dates || {};
   if (!displayFrom || !displayTo || !fromDate || !toDate) {
     return { success: false, message: "Invalid dates provided." };
@@ -565,6 +1097,10 @@ async function runSportsbetExport(dates) {
       transactions: rows,
     };
 
+    if (options.returnPayload) {
+      return { success: true, rowCount: rows.length, payload };
+    }
+
     const jsonContent = JSON.stringify(payload, null, 2);
     const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8" });
     const fileName = `sportsbet-transactions-${displayFrom.replace(/\//g, "-")}-to-${displayTo.replace(/\//g, "-")}.json`;
@@ -585,7 +1121,7 @@ async function runSportsbetExport(dates) {
 }
 
 // Runs inside the Sportsbet tab.
-async function runSportsbetBetsExport(dates) {
+async function runSportsbetBetsExport(dates, options = {}) {
   const { displayFrom, displayTo, fromDate, toDate } = dates || {};
   if (!displayFrom || !displayTo || !fromDate || !toDate) {
     return { success: false, message: "Invalid dates provided." };
@@ -885,6 +1421,10 @@ async function runSportsbetBetsExport(dates) {
       bets: rows,
     };
 
+    if (options.returnPayload) {
+      return { success: true, rowCount: rows.length, payload };
+    }
+
     const jsonContent = JSON.stringify(payload, null, 2);
     const blob = new Blob([jsonContent], { type: "application/json;charset=utf-8" });
     const fileName = `sportsbet-bets-${displayFrom.replace(/\//g, "-")}-to-${displayTo.replace(/\//g, "-")}.json`;
@@ -903,3 +1443,5 @@ async function runSportsbetBetsExport(dates) {
     return { success: false, message: error.message };
   }
 }
+
+// Combined export handled in the extension context to keep injected functions self-contained.

@@ -39,6 +39,34 @@
         font-size: 12px;
         color: #475569;
       }
+      .quick-actions {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .quick-actions button {
+        width: 100%;
+        border: 1px solid #cbd5f5;
+        border-radius: 10px;
+        background: #eef2ff;
+        color: #1e1b4b;
+        padding: 8px 10px;
+        font-weight: 600;
+        cursor: pointer;
+        margin-top: 0;
+      }
+      .quick-actions button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .section-title {
+        margin: 12px 0 6px;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: #64748b;
+      }
       label {
         display: block;
         margin-bottom: 8px;
@@ -97,11 +125,18 @@
     <header class="header">
       <h1>TrackMyBets - Data Download</h1>
       <p class="subheading">
-        Sportsbet restricts you (intentionally??) to downloading only your 50 most recent transactions. Enter a date
-        range to download your full transaction history.
+        Download your bet and transaction data for use with
+        <a href="https://trackmybets.com.au" target="_blank" rel="noopener noreferrer">trackmybets.com.au</a>.
       </p>
     </header>
     <form id="export-form">
+      <div class="section-title">Quick options</div>
+      <div class="quick-actions">
+        <button type="button" id="quick1YearCombined">Download Data - Past 1 Year</button>
+        <button type="button" id="quick2YearCombined">Download Data - Past 2 Years</button>
+        <button type="button" id="quick3YearCombined">Download Data - Past 3 Years</button>
+      </div>
+      <div class="section-title">Custom date range</div>
       <label>
         From date
         <input type="date" id="fromDate" autocomplete="off" required />
@@ -110,14 +145,13 @@
         To date
         <input type="date" id="toDate" autocomplete="off" required />
       </label>
-      <button type="submit" id="fetchBtn">Download Transactions (JSON)</button>
-      <button type="button" id="betsBtn">Download Detailed Bets (JSON)</button>
+      <button type="submit" id="fetchBtn">Download Data - Custom Range</button>
       <p class="hint">
         Ensure the active tab is on <strong>sportsbet.com.au</strong> and you’re logged in before running the exporter.
       </p>
       <p class="hint">
-        TrackMyBets provides insights on an as-is basis without warranty as to completeness or accuracy, and accepts no
-        liability for any errors or omissions.
+        TrackMyBets makes no representation or warranty of any kind, either express or implied, with respect to the
+        data, its timeliness, the information's use or any other matter.
       </p>
       <p class="hint">
         TrackMyBets is independently developed by TrackMyBrown and is neither associated with nor endorsed by Sportsbet
